@@ -251,9 +251,11 @@ async def runtime_status():
 async def subscription_pool_status():
     """Live subscription pool status for the admin UI (read-only)."""
     from app.control.proxy.subscription import get_subscription_manager
+    from app.dataplane.proxy.adapters.headers import signer_health
 
     status = get_subscription_manager().pool_status()
     status["mode"] = config.get_str("proxy.egress.mode", "direct")
+    status["signer"] = signer_health()
     return Response(content=orjson.dumps(status), media_type="application/json")
 
 

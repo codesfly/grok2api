@@ -76,6 +76,13 @@ _SIG_CACHE_MAX = 512
 # Negative cache: after a signer failure, skip remote calls until this monotonic
 # deadline so a dead/slow signer can't block the event loop on every request.
 _SIGNER_FAIL_UNTIL: float = 0.0
+# Signer health — feeds the admin status surface and a one-shot ERROR alert so a
+# silently-dead signer (serving fake signatures) doesn't go unnoticed.
+_SIGNER_FAILS: int = 0  # consecutive remote-fetch failures
+_SIGNER_LAST_OK_MS: float = 0.0  # wall-clock ms of the last successful sign
+_SIGNER_LAST_ERR: str = ""  # last failure reason
+_SIGNER_ALERTED: bool = False  # ERROR already emitted for the current outage
+_SIGNER_ALERT_AFTER = 3  # consecutive fails before alerting
 
 
 def _cache_put(key: str, sig: str, exp: float) -> None:
@@ -97,6 +104,7 @@ def _fetch_remote_statsig(
     success, ``None`` on any failure so the caller can fall back to the fake
     value without aborting the request.
     """
+    global _SIGNER_LAST_ERR
     body = json.dumps({"path": path, "method": method}).encode()
     req = urllib.request.Request(
         signer_url,
@@ -108,10 +116,48 @@ def _fetch_remote_statsig(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         sig = data.get("statsig")
-        return sig if isinstance(sig, str) and sig else None
+        if isinstance(sig, str) and sig:
+            return sig
+        _SIGNER_LAST_ERR = "signer returned no/empty statsig field"
+        return None
     except Exception as exc:
+        _SIGNER_LAST_ERR = str(exc)
         logger.warning("statsig signer request failed: url={} err={}", signer_url, exc)
         return None
+
+
+def _note_signer_ok() -> None:
+    """Record a successful real signature; log recovery if we had alerted."""
+    global _SIGNER_FAILS, _SIGNER_ALERTED, _SIGNER_LAST_OK_MS
+    if _SIGNER_ALERTED:
+        logger.info("statsig signer recovered after {} failed attempts", _SIGNER_FAILS)
+    _SIGNER_FAILS = 0
+    _SIGNER_ALERTED = False
+    _SIGNER_LAST_OK_MS = time.time() * 1000
+
+
+def _note_signer_fail() -> None:
+    """Count a signer failure; emit one ERROR once the outage is sustained."""
+    global _SIGNER_FAILS, _SIGNER_ALERTED
+    _SIGNER_FAILS += 1
+    if _SIGNER_FAILS >= _SIGNER_ALERT_AFTER and not _SIGNER_ALERTED:
+        _SIGNER_ALERTED = True
+        logger.error(
+            "statsig signer unavailable for {} consecutive attempts; serving FAKE "
+            "signatures (last error: {}) — check the signer's egress proxy",
+            _SIGNER_FAILS,
+            _SIGNER_LAST_ERR or "unknown",
+        )
+
+
+def signer_health() -> dict:
+    """Snapshot of signer health for the admin status surface."""
+    return {
+        "ok": _SIGNER_FAILS == 0,
+        "consecutive_fails": _SIGNER_FAILS,
+        "last_ok_ms": int(_SIGNER_LAST_OK_MS),
+        "last_error": _SIGNER_LAST_ERR,
+    }
 
 
 def _fake_statsig_id(cfg) -> str:
@@ -123,7 +169,9 @@ def _fake_statsig_id(cfg) -> str:
             msg = f"x1:TypeError: Cannot read properties of null (reading 'children[\\'{rand}\\']')"
         else:
             rand = "".join(random.choices(string.ascii_lowercase, k=10))
-            msg = f"x1:TypeError: Cannot read properties of undefined (reading '{rand}')"
+            msg = (
+                f"x1:TypeError: Cannot read properties of undefined (reading '{rand}')"
+            )
         return base64.b64encode(msg.encode()).decode()
     return (
         "eDE6VHlwZUVycm9yOiBDYW5ub3QgcmVhZCBwcm9wZXJ0aWVzIG9mIHVuZGVmaW5lZCAocmVhZGluZyAn"
@@ -184,10 +232,12 @@ async def resolve_statsig_id(path: str = "", method: str = "POST") -> str:
             )
             if sig:
                 _SIGNER_FAIL_UNTIL = 0.0
+                _note_signer_ok()
                 if ttl > 0:
                     _cache_put(key, sig, now + ttl)
                 return sig
             _SIGNER_FAIL_UNTIL = now + cfg.get_float("statsig.fail_cooldown", 5.0)
+            _note_signer_fail()
     return _fake_statsig_id(cfg)
 
 

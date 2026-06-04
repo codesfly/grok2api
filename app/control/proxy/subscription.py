@@ -36,6 +36,15 @@ _FETCH_TIMEOUT = 30
 _GROK_PROBE_URL = "https://grok.com/rest/rate-limits"
 _GROK_PROBE_PAYLOAD = orjson.dumps({"modelName": "fast"})
 
+# mihomo proxy-group name for the shared signer egress (see build_mihomo_config).
+# Dashed + prefixed so it can't collide with a real subscription node name.
+_SIGNER_GROUP = "GROK2API-AUTO"
+# url-test probe for that group. Deliberately grok.com (not a generic
+# connectivity URL): these nodes often reach grok while gstatic/google is
+# blocked, and a non-2xx here means the node is grok-unreachable/风控'd — exactly
+# what the signer must avoid. The group thus auto-selects a grok-usable node.
+_SIGNER_PROBE_URL = "https://grok.com/"
+
 
 @dataclass
 class PoolNode:
@@ -127,11 +136,14 @@ def build_mihomo_config(
     controller_port: int,
     secret: str,
 ) -> tuple[dict, list[PoolNode]]:
-    """Build a mihomo config exposing one SOCKS listener per node.
+    """Build a mihomo config exposing one SOCKS listener per node, plus a shared
+    ``url-test`` group on the mixed-port for external consumers (e.g. the statsig
+    signer) that have no access to the in-process node selection.
 
-    Each listener binds directly to its node via the ``proxy`` field, so traffic
-    arriving on that port egresses through exactly that upstream — no rules, no
-    selector group. Returns ``(config_dict, pool_nodes)``.
+    Each per-node listener binds directly to its upstream via the ``proxy`` field
+    (traffic on that port egresses through exactly that node). The mixed-port
+    routes through the url-test group, which probes grok.com and lets mihomo pick
+    a currently grok-reachable node itself. Returns ``(config_dict, pool_nodes)``.
     """
     listeners: list[dict] = []
     nodes: list[PoolNode] = []
@@ -156,8 +168,33 @@ def build_mihomo_config(
                 proxy_url=f"socks5://{listen_host}:{port}",
             )
         )
+    # Shared auto-select group for external consumers (signer) routed via the
+    # mixed-port. Members = all nodes; mihomo's url-test picks the fastest
+    # reachable one and re-checks lazily (only while the group sees traffic).
+    # Guard the (near-impossible) name clash: proxies and groups share one name
+    # map in mihomo, so a node named like the group would make the WHOLE config
+    # unloadable — skip the group rather than write a dead config.
+    proxy_names = [n.name for n in nodes]
+    use_group = bool(proxy_names) and _SIGNER_GROUP not in proxy_names
+    proxy_groups = (
+        [
+            {
+                "name": _SIGNER_GROUP,
+                "type": "url-test",
+                "proxies": proxy_names,
+                "url": _SIGNER_PROBE_URL,
+                "interval": 300,
+                "tolerance": 50,
+                "lazy": True,
+            }
+        ]
+        if use_group
+        else []
+    )
     config = {
-        "mixed-port": listener_base_port - 1,  # housekeeping port, unused for routing
+        # mixed-port routes through the url-test group (see rules) — the single
+        # egress that selection-unaware external clients (signer) can use.
+        "mixed-port": listener_base_port - 1,
         "allow-lan": True,
         "bind-address": "*",
         "mode": "rule",
@@ -178,7 +215,8 @@ def build_mihomo_config(
         "geodata-mode": False,
         "proxies": proxies,
         "listeners": listeners,
-        "rules": ["MATCH,DIRECT"],
+        "proxy-groups": proxy_groups,
+        "rules": [f"MATCH,{_SIGNER_GROUP}"] if use_group else ["MATCH,DIRECT"],
     }
     return config, nodes
 
