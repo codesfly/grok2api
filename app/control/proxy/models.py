@@ -71,6 +71,7 @@ class EgressNode(BaseModel):
     last_used:  int | None       = None  # ms
     name:       str              = ""    # upstream node label (subscription mode)
     latency_ms: int | None       = None  # measured delay; None = untested/unreachable
+    healthy:    bool             = True  # last-test health (subscription mode); routing skips False
 
 
 class ClearanceBundle(BaseModel):

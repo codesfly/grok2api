@@ -37,7 +37,13 @@ class ProxyRuntimeTable:
 
     def healthy_nodes(self) -> list[EgressNode]:
         from app.control.proxy.models import EgressNodeState
-        return [n for n in self.nodes if n.state == EgressNodeState.HEALTHY]
+        # Subscription nodes default state=HEALTHY but carry a separate `healthy`
+        # flag from the last live/probe test; honor both.
+        return [
+            n
+            for n in self.nodes
+            if n.state == EgressNodeState.HEALTHY and n.healthy
+        ]
 
 
 def snapshot_from_directory(directory: "ProxyDirectory") -> ProxyRuntimeTable:

@@ -122,7 +122,12 @@ class ProxyDirectory:
                     EgressNode(node_id=f"res-pool-{i}", proxy_url=url)
                 )
 
-        valid_affinities = {n.proxy_url or "direct" for n in [*nodes, *resource_nodes]}
+        # Subscription nodes carry a health flag; only build/keep clearance
+        # bundles for the ones routing can actually use.
+        affinity_nodes = [*nodes, *resource_nodes]
+        if egress_mode == EgressMode.SUBSCRIPTION:
+            affinity_nodes = [n for n in affinity_nodes if n.healthy]
+        valid_affinities = {n.proxy_url or "direct" for n in affinity_nodes}
         if not valid_affinities:
             valid_affinities = {"direct"}
 
@@ -271,23 +276,38 @@ class ProxyDirectory:
     def _pick_subscription_node(
         self, nodes: list[EgressNode], account_id: str | None
     ) -> str | None:
-        """Per-account-sticky selection across all in-pool nodes.
+        """Per-account-sticky selection over the *full* node set, probing past
+        unhealthy nodes locally.
 
-        Every healthy node participates equally (no primary/backup tiering); the
-        latency cutoff already decided pool membership upstream. An account sticks
-        to one node via a stable hash so it keeps the same egress IP instead of
-        hopping between them.
+        An account hashes to a stable start index over the full pool (whose size
+        only changes when the subscription is re-pulled, not on every retest),
+        then scans forward to the first healthy node. The start is derived from
+        the account alone — the shared ``_pool_cursor`` deliberately does NOT
+        participate, so one account's failure never reshuffles everyone else's
+        mapping. (``feedback()`` still advances the cursor, but that no longer
+        steers account routing: a node that fails a live request is only avoided
+        once the next retest flips its ``healthy`` flag — an accepted MVP lag.)
+
+        Accounts whose own node goes unhealthy roll forward to the next healthy
+        one and snap back on recovery. Requests with no account identity rotate
+        over the healthy subset via the cursor.
         """
-        # Order by stable node identity so the per-account hash maps to the same
-        # node across retests; the failure cursor steers an account elsewhere on
-        # retry, and stays stable while no failures occur → sticky IP.
         pool = sorted(nodes, key=lambda n: n.node_id)
         if account_id:
-            base = int(hashlib.md5(account_id.encode()).hexdigest(), 16)
-            idx = (base + self._pool_cursor) % len(pool)
-        else:
-            idx = self._pool_cursor % len(pool)  # no identity → rotate across the pool
-        return pool[idx].proxy_url
+            n = len(pool)
+            start = int(hashlib.md5(account_id.encode()).hexdigest(), 16) % n
+            for k in range(n):
+                node = pool[(start + k) % n]
+                if node.healthy:
+                    return node.proxy_url
+            return None  # no healthy node → caller fails closed (503)
+        # No identity → rotate over the healthy subset so the cursor actually
+        # lands on a different node each step (a forward-scan over the full pool
+        # would collapse many cursor values onto the same fallback node).
+        healthy = [node for node in pool if node.healthy]
+        if not healthy:
+            return None
+        return healthy[self._pool_cursor % len(healthy)].proxy_url
 
     async def _get_or_build_bundle(
         self,
@@ -366,7 +386,7 @@ class ProxyDirectory:
         if self._clearance_mode == ClearanceMode.NONE:
             return
         async with self._lock:
-            nodes = list(self._nodes)
+            nodes = [n for n in self._nodes if n.healthy]
         affinity_keys = (
             [(n.proxy_url or "direct", n.proxy_url or "") for n in nodes]
             if nodes
@@ -390,7 +410,7 @@ class ProxyDirectory:
         if self._clearance_mode == ClearanceMode.NONE:
             return
         async with self._lock:
-            nodes = list(self._nodes)
+            nodes = [n for n in self._nodes if n.healthy]
             existing = list(self._bundles.keys())
 
         refresh_targets: dict[BundleKey, tuple[str, str]] = {}
@@ -480,9 +500,12 @@ def _subscription_pool_mtime() -> int:
 
 
 def _load_subscription_pool() -> list[EgressNode]:
-    """Build healthy EgressNodes from the persisted subscription pool file.
+    """Build the full EgressNode set from the persisted subscription pool file.
 
-    Only nodes flagged healthy at the last test are exposed for routing.
+    Loads *all* nodes carrying their last-test ``healthy`` flag — not just the
+    healthy ones — so per-account hash routing has a stable pool size that does
+    not shake with every retest (a node going (un)healthy must not reshuffle the
+    whole hash mapping). Selection skips unhealthy nodes via local probing.
     """
     try:
         with open(_pool_file(), encoding="utf-8") as f:
@@ -491,14 +514,13 @@ def _load_subscription_pool() -> list[EgressNode]:
         return []
     nodes: list[EgressNode] = []
     for n in payload.get("nodes", []):
-        if not n.get("healthy"):
-            continue
         nodes.append(
             EgressNode(
                 node_id=n["node_id"],
                 proxy_url=n["proxy_url"],
                 name=n.get("name", ""),
                 latency_ms=n.get("latency_ms"),
+                healthy=bool(n.get("healthy", False)),
             )
         )
     return nodes
