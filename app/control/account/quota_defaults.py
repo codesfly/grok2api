@@ -159,16 +159,19 @@ def normalize_quota_set(pool: str, quota_set: AccountQuotaSet) -> AccountQuotaSe
     return qs
 
 
-def infer_pool(windows: dict[int, QuotaWindow]) -> str:
+def infer_pool(windows: dict[int, QuotaWindow], current_pool: str = "basic") -> str:
     """Infer pool type from live quota windows returned by the rate-limits API.
 
     Uses ``auto.total`` (mode_id=0) as the discriminating signal.
-    Falls back to ``"basic"`` when the value is absent or unrecognised.
+    Returns *current_pool* unchanged when the auto signal is absent or
+    unrecognised, so a transient auto-quota fetch failure cannot demote an
+    account into a lower pool it can never climb back out of (basic pools
+    never probe mode_id=0, making demotion one-way and permanent).
     """
     auto_win = windows.get(0)
     if auto_win is None:
-        return "basic"
-    return _AUTO_TOTAL_TO_POOL.get(auto_win.total, "basic")
+        return current_pool
+    return _AUTO_TOTAL_TO_POOL.get(auto_win.total, current_pool)
 
 
 __all__ = [

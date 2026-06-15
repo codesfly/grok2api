@@ -294,7 +294,9 @@ class AccountRefreshService:
             return RefreshResult(checked=1, failed=0 if refreshed else 1)
 
         # Infer pool type from live quota data and patch if it changed.
-        inferred = infer_pool(windows)  # type: ignore[arg-type]
+        # Pass current pool so a missing/unknown auto signal keeps the pool
+        # as-is instead of silently demoting to basic (one-way lock-in bug).
+        inferred = infer_pool(windows, record.pool)  # type: ignore[arg-type]
         pool_patch = inferred if inferred != record.pool else None
         if pool_patch:
             logger.info(
