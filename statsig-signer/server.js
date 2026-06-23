@@ -125,7 +125,7 @@ function readProxyUrl() {
 
 async function launch(token) {
   const proxyUrl = readProxyUrl();
-  const launchOpts = { headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] };
+  const launchOpts = { headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-software-rasterizer", "--disable-accelerated-2d-canvas"] };
   if (proxyUrl) {
     launchOpts.proxy = { server: proxyUrl };
     log("using proxy:", proxyUrl);
