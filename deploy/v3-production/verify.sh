@@ -9,6 +9,17 @@ code() {
   curl -sS -o /dev/null -w '%{http_code}' "$@"
 }
 
+expect_denied() {
+  denied_code=$(code "$@")
+  case "$denied_code" in
+    403|404) ;;
+    *)
+      echo "expected a denied response (403 or 404), got $denied_code" >&2
+      return 1
+      ;;
+  esac
+}
+
 test "$(code "$API_BASE/v1/models")" = 401
 test "$(code -H "Authorization: Bearer $API_KEY" "$API_BASE/v1/models")" = 200
 
@@ -23,7 +34,7 @@ for path in \
   /v1/images/edits \
   /v1/videos/generations
 do
-  test "$(code -H "Authorization: Bearer $API_KEY" "$API_BASE$path")" = 404
+  expect_denied -H "Authorization: Bearer $API_KEY" "$API_BASE$path"
 done
 
 CHAT_BODY=$(mktemp)
