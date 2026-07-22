@@ -1,0 +1,36 @@
+name: grok2api
+
+services:
+  grok2api:
+    container_name: grok2api-v3
+    image: ghcr.io/chenyme/grok2api:v3.0.7@sha256:fe87bfb46ed14c5fbac7211fc7c88298588953a83d6f043ee5d4c2c595012707
+    ports:
+      - "127.0.0.1:8998:8000"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./config.yaml:/run/grok2api/config.yaml:ro
+      - grok2api-data:/app/data
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    pids_limit: 128
+    mem_limit: 384m
+    cpus: 0.75
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  grok2api-data:
+    name: grok2api-data
