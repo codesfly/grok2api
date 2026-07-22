@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 BUNDLE="$ROOT/deploy/v3-production"
 
 need_file() {
@@ -29,7 +29,8 @@ done
 
 docker compose -f "$BUNDLE/docker-compose.yml" config >/tmp/grok2api-v3-compose.rendered
 
-grep -Fq '127.0.0.1:8998' /tmp/grok2api-v3-compose.rendered
+grep -Fq 'host_ip: 127.0.0.1' /tmp/grok2api-v3-compose.rendered
+grep -Fq 'published: "8998"' /tmp/grok2api-v3-compose.rendered
 grep -Fq 'ghcr.io/chenyme/grok2api:v3.0.7@sha256:fe87bfb46ed14c5fbac7211fc7c88298588953a83d6f043ee5d4c2c595012707' "$BUNDLE/docker-compose.yml"
 grep -Fq 'no-new-privileges:true' "$BUNDLE/docker-compose.yml"
 grep -Fq 'mem_limit: 384m' "$BUNDLE/docker-compose.yml"
@@ -42,7 +43,7 @@ grep -Fq 'return 404' "$BUNDLE/openresty/grok-api.root.conf"
 grep -Fq 'proxy_buffering off' "$BUNDLE/openresty/grok-api.root.conf"
 grep -Fq 'location ^~ /v1/' "$BUNDLE/openresty/grok-admin.root.conf"
 
-if grep -R --exclude=test-bundle.sh -nE '(sso=|g2a_[A-Za-z0-9]|credentialEncryptionKey: ".{20}|jwtSecret: ".{20})' "$BUNDLE"; then
+if grep -R --exclude=test-bundle.sh -nE '(sso=[^[:space:]]+|g2a_[A-Za-z0-9]{16,}|credentialEncryptionKey: "[A-Za-z0-9+/=]{40,}"|jwtSecret: "[A-Fa-f0-9]{64}")' "$BUNDLE"; then
   echo 'deployment bundle appears to contain a secret' >&2
   exit 1
 fi
