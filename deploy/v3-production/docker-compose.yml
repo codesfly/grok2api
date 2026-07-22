@@ -20,6 +20,7 @@ services:
       - ALL
     cap_add:
       - CHOWN
+      - FOWNER
       - SETGID
       - SETUID
     pids_limit: 128

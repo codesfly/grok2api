@@ -33,6 +33,7 @@ grep -Fq 'host_ip: 127.0.0.1' /tmp/grok2api-v3-compose.rendered
 grep -Fq 'published: "8998"' /tmp/grok2api-v3-compose.rendered
 grep -Fq 'ghcr.io/chenyme/grok2api:v3.0.7@sha256:fe87bfb46ed14c5fbac7211fc7c88298588953a83d6f043ee5d4c2c595012707' "$BUNDLE/docker-compose.yml"
 grep -Fq 'no-new-privileges:true' "$BUNDLE/docker-compose.yml"
+grep -Fq -- '      - FOWNER' "$BUNDLE/docker-compose.yml"
 grep -Fq 'mem_limit: 384m' "$BUNDLE/docker-compose.yml"
 grep -Fq 'pids_limit: 128' "$BUNDLE/docker-compose.yml"
 
