@@ -11,6 +11,11 @@ services:
     volumes:
       - ./config.yaml:/run/grok2api/config.yaml:ro
       - grok2api-data:/app/data
+    networks:
+      default:
+      zixungou_internal:
+        aliases:
+          - grok-api-internal
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -35,3 +40,8 @@ services:
 volumes:
   grok2api-data:
     name: grok2api-data
+
+networks:
+  zixungou_internal:
+    external: true
+    name: repo_default

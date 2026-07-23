@@ -22,6 +22,18 @@ docker inspect grok2api-v3 --format '{{.RestartCount}} {{.State.OOMKilled}}'
 
 Never print `config.yaml`, `bootstrap-credentials.txt`, `backup.pass`, API keys, cookies, or imported account files into automation logs.
 
+## Same-host Docker clients
+
+The Grok2API service also joins the existing `repo_default` network with the
+alias `grok-api-internal`. Containers on that network can use:
+
+```text
+http://grok-api-internal:8000/v1
+```
+
+Internal clients must still authenticate with a dedicated client key. Do not
+put that key in browser-side code.
+
 ## Upgrade
 
 1. Run and verify an encrypted backup.
