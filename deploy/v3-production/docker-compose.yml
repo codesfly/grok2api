@@ -3,7 +3,7 @@ name: grok2api
 services:
   grok2api:
     container_name: grok2api-v3
-    image: ghcr.io/chenyme/grok2api:v3.0.7@sha256:fe87bfb46ed14c5fbac7211fc7c88298588953a83d6f043ee5d4c2c595012707
+    image: ghcr.io/chenyme/grok2api:v3.0.8@sha256:0504cd51a57f401efdb5116edc1486ff9bbe3bb2a6c5651b8901d857bb41b224
     ports:
       - "127.0.0.1:8998:8000"
     environment:

@@ -34,7 +34,7 @@ grep -Fq 'published: "8998"' /tmp/grok2api-v3-compose.rendered
 grep -Fq '          - grok-api-internal' /tmp/grok2api-v3-compose.rendered
 grep -Fq '    name: repo_default' /tmp/grok2api-v3-compose.rendered
 grep -Fq '    external: true' /tmp/grok2api-v3-compose.rendered
-grep -Fq 'ghcr.io/chenyme/grok2api:v3.0.7@sha256:fe87bfb46ed14c5fbac7211fc7c88298588953a83d6f043ee5d4c2c595012707' "$BUNDLE/docker-compose.yml"
+grep -Fq 'ghcr.io/chenyme/grok2api:v3.0.8@sha256:0504cd51a57f401efdb5116edc1486ff9bbe3bb2a6c5651b8901d857bb41b224' "$BUNDLE/docker-compose.yml"
 grep -Fq 'no-new-privileges:true' "$BUNDLE/docker-compose.yml"
 grep -Fq -- '      - FOWNER' "$BUNDLE/docker-compose.yml"
 grep -Fq 'mem_limit: 384m' "$BUNDLE/docker-compose.yml"
