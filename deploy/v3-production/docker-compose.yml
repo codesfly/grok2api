@@ -1,0 +1,47 @@
+name: grok2api
+
+services:
+  grok2api:
+    container_name: grok2api-v3
+    image: ghcr.io/chenyme/grok2api:v3.0.9@sha256:0bee0337e85aeee440ba94c16bd9ad37f3b0046d8d80f9830968b69b61dde66f
+    ports:
+      - "127.0.0.1:8998:8000"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./config.yaml:/run/grok2api/config.yaml:ro
+      - grok2api-data:/app/data
+    networks:
+      default:
+      zixungou_internal:
+        aliases:
+          - grok-api-internal
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETGID
+      - SETUID
+    pids_limit: 128
+    mem_limit: 384m
+    cpus: 0.75
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  grok2api-data:
+    name: grok2api-data
+
+networks:
+  zixungou_internal:
+    external: true
+    name: repo_default

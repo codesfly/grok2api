@@ -57,3 +57,9 @@ htmlcov/
 CLAUDE.md
 STATSIG_SIGNER_PLAN.md
 docs/
+docs/grok_signer_factory.dump.js
+# Grok2API v3 production-generated secrets
+deploy/v3-production/config.yaml
+deploy/v3-production/bootstrap-credentials.txt
+deploy/v3-production/backup.pass
+deploy/v3-production/backups/

@@ -1,0 +1,16 @@
+[Unit]
+Description=Encrypted Grok2API SQLite backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/1panel/apps/local/grok2api/backup.sh
+User=root
+Group=root
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/opt/1panel/backups/grok2api
+ReadOnlyPaths=/opt/1panel/apps/local/grok2api /var/lib/docker /root/.config/grok2api-backup.pass
