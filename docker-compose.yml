@@ -57,6 +57,9 @@ services:
   statsig-signer:
     container_name: statsig-signer
     image: duanzhenyu/statsig-signer:latest
+    # 用 Docker 自带 tini 当 1 号进程，回收 Chromium 反复 launch/close 留下的
+    # headless_shell 僵尸子进程（node 作 PID 1 不会收养孤儿进程）。
+    init: true
     environment:
       TZ: Asia/Shanghai
       PORT: "3000"

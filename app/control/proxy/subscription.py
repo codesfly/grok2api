@@ -30,10 +30,29 @@ from app.platform.runtime.clock import now_ms
 _SUB_UA = "clash-verge/v2.0.0"
 _FETCH_TIMEOUT = 30
 
+
+# mihomo parses YAML with Go's yaml.v3, whose scalar resolver is broader than
+# PyYAML's (YAML 1.1). A bare string like a REALITY short-id "473277e2" is left
+# unquoted by safe_dump but read back by mihomo as the float 4.73277e+07, which
+# fails REALITY validation and crash-loops the sidecar. Rather than chase Go's
+# full resolver token-by-token (underscored numbers, signed 0o/0x, timestamps…),
+# force-quote *every* string scalar so it always survives as a string. Only
+# Python str values are affected; real ints/floats/bools keep their native form.
+class _MihomoDumper(yaml.SafeDumper):
+    """SafeDumper that single-quotes all string scalars for Go yaml.v3 safety."""
+
+
+def _represent_str(dumper: yaml.SafeDumper, data: str):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="'")
+
+
+_MihomoDumper.add_representer(str, _represent_str)
+
 # Authenticated grok probe used by verify_with_grok mode. The rate-limits API
 # is a *read* (does not consume the account's chat quota) yet traverses the full
 # statsig-signed + Cloudflare path, so a风控'd egress IP shows up as 403/challenge.
 _GROK_PROBE_URL = "https://grok.com/rest/rate-limits"
+_GROK_PROBE_PATH = "/rest/rate-limits"  # path component for the pre-sign health check
 _GROK_PROBE_PAYLOAD = orjson.dumps({"modelName": "fast"})
 
 # mihomo proxy-group name for the shared signer egress (see build_mihomo_config).
@@ -393,11 +412,22 @@ class SubscriptionManager:
             )
             return state
 
-    async def _test_nodes(self, cfg: dict, nodes: list[PoolNode]) -> None:
+    async def _test_nodes(
+        self,
+        cfg: dict,
+        nodes: list[PoolNode],
+        *,
+        test_url: str | None = None,
+        expected: int | None = None,
+    ) -> None:
         """Measure each node's delay to the test URL via mihomo's control API,
-        updating ``latency_ms``/``healthy`` in place. Runs concurrently."""
+        updating ``latency_ms``/``healthy`` in place. Runs concurrently.
+
+        ``test_url``/``expected`` override the configured connectivity target —
+        used for the signature-free Cloudflare gate (grok.com requiring HTTP 200)."""
         api, secret = cfg["api"], cfg["secret"]
-        test_url, timeout_ms = cfg["test_url"], cfg["test_timeout_ms"]
+        test_url = test_url or cfg["test_url"]
+        timeout_ms = cfg["test_timeout_ms"]
         headers = {"Authorization": f"Bearer {secret}"} if secret else {}
         sem = asyncio.Semaphore(20)
         client_timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000 + 5)
@@ -411,6 +441,8 @@ class SubscriptionManager:
                     f"{api.rstrip('/')}/proxies/{quote(node.name, safe='')}/delay"
                     f"?url={quote(test_url, safe='')}&timeout={timeout_ms}"
                 )
+                if expected is not None:
+                    url += f"&expected={expected}"
                 async with sem:
                     try:
                         async with session.get(url) as resp:
@@ -452,17 +484,63 @@ class SubscriptionManager:
     async def _run_test(self, cfg: dict, nodes: list[PoolNode]) -> None:
         """Measure each node's latency + availability in place.
 
-        With ``verify_with_grok`` on, probe via a real authenticated grok request
-        (the accurate "can this IP serve grok" signal). Falls back to the cheap
-        mihomo delay test when the toggle is off, or when no account tokens are
-        available (inconclusive) — so we never end up with an empty pool.
+        Plain mode (``verify_with_grok`` off): one mihomo delay test against the
+        configured connectivity URL.
+
+        Grok mode: a two-stage test that survives a dead signer.
+          1. Signature-free Cloudflare gate — mihomo delay against grok.com
+             requiring HTTP 200, so only IPs that actually clear Cloudflare pass.
+             Needs no statsig signature, so a signer outage can't false-kill clean
+             nodes with fake-signature 403s.
+          2. Real-signature refinement (optional) — only when the signer is
+             genuinely usable, probe the CF survivors via the rate-limits API so
+             its 403s are a trustworthy node/IP verdict, not fake-sig noise.
 
         Measurement only — the ``max_latency_ms`` cutoff is applied by the caller
         AFTER the build-then-swap guard, so an intentional config filter to 0 is
         honored while a transient probe failure still keeps the last-known-good.
         """
-        if not (cfg["verify_with_grok"] and await self._verify_with_grok(cfg, nodes)):
+        if not cfg["verify_with_grok"]:
             await self._test_nodes(cfg, nodes)
+            return
+        # Stage 1: Cloudflare gate (no signature needed).
+        await self._test_nodes(cfg, nodes, test_url=_SIGNER_PROBE_URL, expected=200)
+        # Stage 2: trust grok-probe verdicts only with a genuinely healthy signer.
+        if not await self._signer_usable():
+            logger.info(
+                "subscription grok-verify: signer unusable, keeping Cloudflare-gate "
+                "result only ({} nodes passed)",
+                sum(1 for n in nodes if n.healthy),
+            )
+            return
+        alive = [n for n in nodes if n.healthy]
+        if alive:
+            await self._verify_with_grok(cfg, alive)
+
+    @staticmethod
+    async def _signer_usable() -> bool:
+        """True only if the signer returns a real (non-fallback) signature right
+        now, so grok-probe 403s can be trusted as node/IP faults rather than
+        fake-signature noise from a dead signer.
+
+        The fallback from ``_fake_statsig_id`` is base64-encoded ``x1:``/``e:``
+        text (raw value starts with ``eDE6...``), so the marker must be checked
+        AFTER decoding — a real signature does not decode to that prefix."""
+        import base64
+
+        from app.dataplane.proxy.adapters.headers import resolve_statsig_id
+
+        try:
+            sig = await resolve_statsig_id(_GROK_PROBE_PATH, "POST")
+        except Exception:
+            return False
+        if not sig:
+            return False
+        try:
+            decoded = base64.b64decode(sig).decode("utf-8", "ignore")
+        except Exception:
+            return True  # undecodable as the fake text → treat as a real signature
+        return not (decoded.startswith("x1:") or decoded.startswith("e:"))
 
     @staticmethod
     def _apply_latency_cutoff(cfg: dict, nodes: list[PoolNode]) -> None:
@@ -595,7 +673,9 @@ class SubscriptionManager:
         path = self._local_config_path()
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+            yaml.dump(
+                config, f, Dumper=_MihomoDumper, allow_unicode=True, sort_keys=False
+            )
         os.replace(tmp, path)
 
     def _write_pool(self, state: PoolState) -> None:

@@ -1,23 +1,14 @@
 # ── Builder ───────────────────────────────────────────────────────────────────
-FROM python:3.13-alpine AS builder
+# glibc (Debian) base: SQLite WAL works, and all deps ship manylinux wheels so
+# no Rust/C toolchain is needed. musl/Alpine forced source builds and, after the
+# sqlite-libs 3.53 bump, broke SQLite WAL (disk I/O error on journal_mode=WAL).
+FROM python:3.13-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
 ENV PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"
-
-# Rust/Cargo are required to compile curl-cffi wheels on musl/Alpine.
-# If upstream ever ships musl wheels, remove cargo + rust to speed up builds.
-RUN apk add --no-cache \
-    ca-certificates \
-    build-base \
-    linux-headers \
-    libffi-dev \
-    openssl-dev \
-    curl-dev \
-    cargo \
-    rust
 
 WORKDIR /app
 
@@ -32,11 +23,10 @@ RUN uv sync --frozen --no-dev --no-install-project \
          \( -name "__pycache__" -o -name "tests" -o -name "test" -o -name "testing" \) \
          -prune -exec rm -rf {} + \
     && find /opt/venv -type f -name "*.pyc" -delete \
-    && find /opt/venv -type f -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null; true \
     && rm -rf /root/.cache /tmp/uv-cache
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
-FROM python:3.13-alpine
+FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -48,14 +38,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-RUN apk add --no-cache \
-    tzdata \
-    ca-certificates \
-    libffi \
-    openssl \
-    libgcc \
-    libstdc++ \
-    libcurl
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -70,8 +55,9 @@ RUN mkdir -p /app/data /app/logs \
 
 EXPOSE 8000
 
+# python-based healthcheck (Debian slim has no wget).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["sh", "-c", "wget -qO /dev/null http://127.0.0.1:${SERVER_PORT}/health || exit 1"]
+    CMD ["python", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ['SERVER_PORT']+'/health', timeout=4).status==200 else 1)"]
 
 ENTRYPOINT ["/app/scripts/entrypoint.sh"]
 CMD ["sh", "-c", "exec granian --interface asgi --host ${SERVER_HOST} --port ${SERVER_PORT} --workers ${SERVER_WORKERS} app.main:app"]

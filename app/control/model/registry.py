@@ -32,10 +32,9 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.20-expert",                       ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 Expert",        prefer_best=True),
     ModelSpec("grok-4.20-heavy",                        ModeId.HEAVY,    Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 Heavy",         prefer_best=True),
 
-    # === grok-4.3 ============================================================
-    # grok.com 的 Fast/Expert 模式底层已升级为 Grok 4.3，用标准 modeId="expert"
-    # 即可（旧的 grok-420-computer-use-sa modeId 已失效，xai 返回 403）。
-    ModelSpec("grok-4.3-beta",                          ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.3 Beta"),
+    # === grok-4.3 (modeId=grok-420) ==========================================
+    # Super+（basic 池不支持此模式）；grok-4.3-beta 保留为兼容别名
+    ModelSpec("grok-4.3",                               ModeId.GROK_4_3, Tier.SUPER, Capability.CHAT,       True, "Grok 4.3", aliases=("grok-4.3-beta",)),
 
     # === Image ==============================================================
 
@@ -61,7 +60,15 @@ MODELS: tuple[ModelSpec, ...] = (
 # Internal lookup structures — built once at import time.
 # ---------------------------------------------------------------------------
 
-_BY_NAME: dict[str, ModelSpec] = {m.model_name: m for m in MODELS}
+_BY_NAME: dict[str, ModelSpec] = {}
+for _m in MODELS:
+    for _name in (_m.model_name, *_m.aliases):
+        if _name in _BY_NAME:
+            raise ValueError(
+                f"Duplicate model name/alias {_name!r}: "
+                f"{_BY_NAME[_name].model_name!r} vs {_m.model_name!r}"
+            )
+        _BY_NAME[_name] = _m
 
 _BY_CAP: dict[int, list[ModelSpec]] = {}
 for _m in MODELS:

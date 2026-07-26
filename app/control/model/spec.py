@@ -20,6 +20,13 @@ class ModelSpec:
     ``public_name`` is the human-readable display name.
     ``prefer_best`` when True, reverses pool priority to try higher-tier
                     pools first (hard priority, not soft preference).
+    ``aliases``     back-compat names that resolve to this same spec but are
+                    hidden from ``/v1/models``. Use to rename a model's public
+                    identifier while keeping old names working. Honored anywhere
+                    that goes through ``registry.resolve``/``get``; capability
+                    paths that still branch on the raw request ``model`` string
+                    (e.g. image lite/pro) must be updated before aliasing those
+                    models.
     """
 
     model_name: str
@@ -29,6 +36,7 @@ class ModelSpec:
     enabled: bool
     public_name: str
     prefer_best: bool = False
+    aliases: tuple[str, ...] = ()
 
     # --- convenience predicates ---
 

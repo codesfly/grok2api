@@ -28,6 +28,9 @@ const SIGN_TTL_MS = parseInt(process.env.SIGN_TTL_MS || "45000", 10); // server 
 const SIGN_CACHE_MAX = parseInt(process.env.SIGN_CACHE_MAX || "512", 10);
 const READY_TIMEOUT_MS = parseInt(process.env.READY_TIMEOUT_MS || "90000", 10);
 const EVAL_TIMEOUT_MS = parseInt(process.env.EVAL_TIMEOUT_MS || "10000", 10);
+// Background self-heal interval: re-attempt launch while the signer is not ready
+// (e.g. boot raced a CF-blocked egress node) so it recovers without manual restart.
+const WATCHDOG_MS = parseInt(process.env.WATCHDOG_MS || "30000", 10);
 const TEST_PATH = "/rest/app-chat/conversations/new";
 
 // Robust chunk injection: match `.A(<n>).then(<x>=><y>(<x>.default()))` and
@@ -46,6 +49,15 @@ let launching = null; // promise guard against concurrent (re)launch
 let candidates = []; // ordered sso-token candidates to try
 let candidateIdx = 0; // which candidate the current page is logged in with
 const cache = new Map(); // "METHOD|path" -> {sig, exp}
+
+// Exponential backoff for the self-heal loop. Without it, a persistently
+// unobtainable signer (CF-blocked egress, or a grok bundle change that breaks
+// chunk injection) makes the watchdog relaunch a full Chromium per candidate
+// token every WATCHDOG_MS forever — the 24h CPU churn. After a failed round we
+// back off geometrically (WATCHDOG_MS, x2, ... capped) and gate all relaunches.
+const BACKOFF_MAX_MS = parseInt(process.env.BACKOFF_MAX_MS || "600000", 10); // 10 min cap
+let backoffMs = 0; // current cooldown after a failed round (0 = none)
+let nextAttemptAt = 0; // Date.now() before which ensureLaunched() is a no-op
 
 function log(...a) {
   console.log(new Date().toISOString(), ...a);
@@ -145,11 +157,13 @@ async function launch(token) {
   ]);
 
   // Rewrite next.js chunks to expose grok's signer instance.
+  let patched = false; // did any chunk match the injection regex this launch?
   await context.route("**/_next/static/chunks/**/*.js", async (route) => {
     try {
       const resp = await route.fetch();
       const body = await resp.text();
       if (INJECT_RE.test(body)) {
+        patched = true;
         log("signer chunk patched:", new URL(route.request().url()).pathname);
         await route.fulfill({ response: resp, body: body.replace(INJECT_RE, INJECT_TO) });
         return;
@@ -165,7 +179,12 @@ async function launch(token) {
   page = await context.newPage();
   await page.goto("https://grok.com/", { waitUntil: "domcontentloaded", timeout: 60000 });
   log("page loaded, waiting for signer readiness...");
-  return waitReady();
+  const ok = await waitReady();
+  // Distinguish failure modes: no chunk ever matched the regex means the bundle
+  // changed or CF blocked the chunk download — rotating tokens won't help.
+  if (!ok && !patched)
+    log("WARN: signer injection regex matched no chunk — grok bundle may have changed or CF blocked the chunk download");
+  return ok;
 }
 
 // Poll until window.__grokSigner exists AND a test sign succeeds (grok must
@@ -235,14 +254,23 @@ function sleep(ms) {
 
 // Tear down and (re)launch, rotating through token candidates until one yields
 // a ready signer. Guarded so only one relaunch runs at a time.
+function backOff(reason) {
+  backoffMs = Math.min(backoffMs ? backoffMs * 2 : WATCHDOG_MS, BACKOFF_MAX_MS);
+  nextAttemptAt = Date.now() + backoffMs;
+  log(reason + "; next retry in", Math.round(backoffMs / 1000) + "s");
+}
+
 function ensureLaunched() {
+  // Honor the backoff cooldown for all callers (watchdog + on-demand sign()):
+  // during an outage we stop churning Chromium and let the client serve fakes.
+  if (Date.now() < nextAttemptAt) return launching || Promise.resolve();
   if (!launching) {
     launching = (async () => {
       try {
         if (!candidates.length) candidates = await loadCandidateTokens();
         if (!candidates.length) {
           await closeAll();
-          log("no sso token available (env GROK_SSO_TOKEN empty and no active accounts in DB)");
+          backOff("no sso token available (env GROK_SSO_TOKEN empty and no active accounts in DB)");
           return;
         }
         const n = candidates.length;
@@ -252,6 +280,8 @@ function ensureLaunched() {
           try {
             if (await launch(candidates[idx])) {
               candidateIdx = idx;
+              backoffMs = 0; // success: reset the backoff schedule
+              nextAttemptAt = 0;
               return;
             }
             log("candidate not ready, rotating:", idx);
@@ -259,10 +289,13 @@ function ensureLaunched() {
             log("launch failed for candidate", idx, ":", e.message);
           }
         }
-        // All exhausted — drop the list so the next attempt re-reads the DB.
+        // All exhausted — tear down the last (dead) browser so it doesn't sit
+        // resident through the cooldown, and so on-demand sign() fast-fails on
+        // a null page instead of burning two EVAL_TIMEOUT_MS on a dead one.
+        await closeAll();
         candidates = [];
         candidateIdx = 0;
-        log("all token candidates exhausted, signer not ready");
+        backOff("all token candidates exhausted, signer not ready");
       } finally {
         launching = null;
       }
@@ -301,6 +334,12 @@ async function sign(path, method) {
   }
   if (!isValidSig(sig)) throw new Error("signer returned fallback/invalid value");
 
+  // A real signature is the strongest proof the signer is usable; clear any
+  // stale not-ready state so /health stops reporting a false negative, and
+  // reset the backoff so the watchdog resumes its normal cadence.
+  ready = true;
+  backoffMs = 0;
+  nextAttemptAt = 0;
   cachePut(key, sig, now + SIGN_TTL_MS);
   return sig;
 }
@@ -369,6 +408,11 @@ const server = http.createServer(async (req, res) => {
     log("initial launch failed:", e.message);
     // Server stays up; /sign will retry launch on demand.
   }
+  // Self-heal: keep retrying in the background until ready, so a boot that raced
+  // a CF-blocked egress node recovers on its own once the egress switches over.
+  setInterval(() => {
+    if (!ready) ensureLaunched().catch(() => {});
+  }, WATCHDOG_MS).unref();
 })();
 
 process.on("SIGTERM", async () => {
