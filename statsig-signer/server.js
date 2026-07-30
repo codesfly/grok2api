@@ -31,6 +31,10 @@ const EVAL_TIMEOUT_MS = parseInt(process.env.EVAL_TIMEOUT_MS || "10000", 10);
 // Background self-heal interval: re-attempt launch while the signer is not ready
 // (e.g. boot raced a CF-blocked egress node) so it recovers without manual restart.
 const WATCHDOG_MS = parseInt(process.env.WATCHDOG_MS || "30000", 10);
+// Periodic browser recycle: the page stays parked on grok.com for days, so the
+// renderer's JS heap/DOM creeps up until it OOMs the box. Rebuild the whole
+// browser on an interval to reclaim that memory. 0 disables. Default 2h.
+const RECYCLE_MS = parseInt(process.env.RECYCLE_MS || "7200000", 10);
 const TEST_PATH = "/rest/app-chat/conversations/new";
 
 // Robust chunk injection: match `.A(<n>).then(<x>=><y>(<x>.default()))` and
@@ -312,6 +316,29 @@ async function closeAll() {
   browser = context = page = null;
 }
 
+// Periodically rebuild the browser to release accumulated renderer memory.
+// Skips a tick if a (re)launch is already running; the launching guard keeps a
+// concurrent sign-triggered relaunch from double-launching, and the server-side
+// cache absorbs requests during the few seconds of rebuild.
+function scheduleRecycle() {
+  if (RECYCLE_MS <= 0) return;
+  const timer = setInterval(async () => {
+    if (launching) {
+      log("recycle skipped: (re)launch already in progress");
+      return;
+    }
+    log("scheduled recycle: rebuilding browser to reclaim memory");
+    try {
+      await closeAll();
+      await ensureLaunched();
+      log("scheduled recycle done, ready =", ready);
+    } catch (e) {
+      log("scheduled recycle failed:", e.message);
+    }
+  }, RECYCLE_MS);
+  if (timer.unref) timer.unref();
+}
+
 // ---------------------------------------------------------------------------
 // Signing with server-side cache + one self-healing retry
 // ---------------------------------------------------------------------------
@@ -413,6 +440,8 @@ const server = http.createServer(async (req, res) => {
   setInterval(() => {
     if (!ready) ensureLaunched().catch(() => {});
   }, WATCHDOG_MS).unref();
+  scheduleRecycle();
+  if (RECYCLE_MS > 0) log("periodic recycle every", RECYCLE_MS, "ms");
 })();
 
 process.on("SIGTERM", async () => {
