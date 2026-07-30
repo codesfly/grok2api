@@ -1,8 +1,8 @@
+# 精简部署：仅运行 grok2api 与 statsig-signer。
 services:
   grok2api:
     container_name: grok2api
-    # 使用推送到 DockerHub 的镜像；改代码后需重新 build + push 才生效
-    image: duanzhenyu/grok2api:latest
+    image: ghcr.io/codesfly/grok2api:latest
     ports:
       - "${HOST_PORT:-8000}:${SERVER_PORT:-8000}"
     environment:
@@ -16,88 +16,31 @@ services:
       ACCOUNT_REDIS_URL: ${ACCOUNT_REDIS_URL:-}
       ACCOUNT_MYSQL_URL: ${ACCOUNT_MYSQL_URL:-}
       ACCOUNT_POSTGRESQL_URL: ${ACCOUNT_POSTGRESQL_URL:-}
-      # Statsig 签名服务地址（留空则回退内置假值；默认指向同网络的签名机）
       GROK_STATSIG_SIGNER_URL: ${GROK_STATSIG_SIGNER_URL:-http://statsig-signer:3000/sign}
-      # 启用 CF 自动刷新: 取消以下三行注释，并取消底部 flaresolverr 服务的注释
-      # FLARESOLVERR_URL: http://flaresolverr:8191
-      # CF_REFRESH_INTERVAL: "600"
-      # CF_TIMEOUT: "60"
-
-      # ACCOUNT_STORAGE: local | redis | mysql | postgresql
-      # ACCOUNT_LOCAL_PATH: SQLite path when ACCOUNT_STORAGE=local
-      # ACCOUNT_REDIS_URL: Redis DSN when ACCOUNT_STORAGE=redis
-      # ACCOUNT_MYSQL_URL: MySQL DSN when ACCOUNT_STORAGE=mysql
-      # ACCOUNT_POSTGRESQL_URL: PostgreSQL DSN when ACCOUNT_STORAGE=postgresql
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
     depends_on:
       - statsig-signer
-      - mihomo
     restart: unless-stopped
 
-  # 订阅代理池内核：把 Clash 订阅的每个节点暴露成本地 socks 端口，供 grok2api
-  # 在 proxy.egress.mode=subscription 时按账号轮换 IP。不用订阅模式时它空跑、无副作用。
-  # grok2api 会生成 ./data/mihomo.yaml 并通过控制接口热重载本服务。
-  mihomo:
-    container_name: mihomo
-    image: metacubex/mihomo:latest
-    volumes:
-      - ./data:/data
-    # 首启时 mihomo.yaml 尚未生成，先写一份最小可启动配置；之后由 grok2api 覆盖并 reload。
-    # 默认 secret 为空，与 proxy.subscription.mihomo_secret 默认值一致。
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        [ -f /data/mihomo.yaml ] || printf 'mixed-port: 7099\nexternal-controller: 0.0.0.0:9090\nsecret: ""\nlog-level: warning\n' > /data/mihomo.yaml
-        exec /mihomo -d /data -f /data/mihomo.yaml
-    restart: unless-stopped
-
-  # x-statsig-id 签名机：无头浏览器跑 grok 自己的 JS 实时算签名
   statsig-signer:
     container_name: statsig-signer
-    image: duanzhenyu/statsig-signer:latest
+    image: ghcr.io/codesfly/statsig-signer:latest
     # 用 Docker 自带 tini 当 1 号进程，回收 Chromium 反复 launch/close 留下的
     # headless_shell 僵尸子进程（node 作 PID 1 不会收养孤儿进程）。
     init: true
     environment:
       TZ: Asia/Shanghai
       PORT: "3000"
-      # 可选：留空则自动从挂载的 accounts.db 取第一个 active 账号（失效自动轮换下一个）；
-      # 填值则强制使用该 token（最高优先级覆盖）
       GROK_SSO_TOKEN: ${GROK_SSO_TOKEN:-}
-      # 留空则签名机自行读取挂载的 data/config.toml 里的 proxy.egress.proxy_url
       PROXY_URL: ${STATSIG_PROXY_URL:-}
     volumes:
-      - ./data:/app/data:ro   # 只读：取代理配置
+      - ./data:/app/data:ro
+      - ./statsig-signer/server.js:/app/server.js:ro
     restart: unless-stopped
-    # 无头 Chromium 常驻页面会空转吃满核，限制 CPU 以免拖垮宿主机；
-    # 签名按需+缓存(SIGN_TTL)，限到 0.5 核足够，如签名变慢可调高
     deploy:
       resources:
         limits:
-          cpus: "0.5"
-
-  # 如果出口 IP 不干净，可取消以下注释使用 Warp 作为落地代理
-  # 启用后将 proxy.base_proxy_url 设为 socks5://warp:1080
-  # warp:
-  #   container_name: warp
-  #   image: caomingjun/warp:latest
-  #   restart: unless-stopped
-  #   ports:
-  #     - "127.0.0.1:1080:1080"
-  #   environment:
-  #     - WARP_SLEEP=2
-  #   cap_add:
-  #     - NET_ADMIN
-
-  # 启用 CF 自动刷新时取消以下注释
-  # flaresolverr:
-  #   container_name: flaresolverr
-  #   image: ghcr.io/flaresolverr/flaresolverr:latest
-  #   ports:
-  #     - "127.0.0.1:8191:8191"
-  #   environment:
-  #     TZ: Asia/Shanghai
-  #     LOG_LEVEL: info
-  #   restart: unless-stopped
+          cpus: "0.3"
+          memory: 512M
